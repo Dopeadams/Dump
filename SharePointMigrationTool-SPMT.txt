@@ -1,0 +1,106 @@
+# =====================================================================
+# A. Get subsites list
+# =====================================================================
+
+# Returns a list of subsites for the supplied root site
+function Get-Subsites{
+    param([string]$rootSite)
+
+Write-Host $rootSite
+
+# 1. Query on-premises REST API for all immediate child webs/subsites
+Write-Host "Detecting child subsites to exclude..." -ForegroundColor Cyan
+$SubWebsResponse = Invoke-RestMethod `
+    -Uri "$rootSite/_api/web/webs?`$select=Title,ServerRelativeUrl" `
+    -Method Get `
+    -UseDefaultCredentials `
+    -Headers @{ "Accept" = "application/json;odata=verbose" }
+
+# Extract the Titles/Names of all child subsites
+$SubWebNames = ($SubWebsResponse.d.results | ForEach-Object { $_.Title }) -join ';'
+Write-Host "Excluding subsites:" $SubWebNames -ForegroundColor Yellow
+
+    return $SubWebNames;
+}
+
+# =====================================================================
+# 1. IMPORT SPMT POWERSHELL MODULE
+# =====================================================================
+$ModulePath = "$env:LOCALAPPDATA\Apps\SharePointMigrationTool\SPMT\Microsoft.SharePoint.MigrationTool.PowerShell.psd1"
+
+if (Test-Path $ModulePath) {
+    Import-Module $ModulePath -Verbose
+} else {
+    Write-Error "SPMT module not found at $ModulePath. Ensure SPMT is installed."
+    return
+}
+
+# =====================================================================
+# 2. DEFINE SCAN PARAMETERS
+# =====================================================================
+$SourceOnPremUrl = "2019 source"
+$TargetUrl    = "SPO environment"
+$ReportFolder    = "folder to storereports"
+
+# Ensure output directory exists
+if (-not (Test-Path $ReportFolder)) {
+    New-Item -ItemType Directory -Path $ReportFolder | Out-Null
+}
+
+# =====================================================================
+# 3. REGISTER SESSION IN SCAN-ONLY MODE
+# Note: This will trigger ONE modern auth browser popup.
+# Select your CAC/PIV Certificate and enter your PIN.
+# =====================================================================
+Write-Host "Connecting to DoD M365 Cloud. Please complete the CAC sign-in prompt..." -ForegroundColor Cyan
+
+$subsiteWebnames = Get-Subsites($SourceOnPremUrl)
+
+
+# Registration requires authentication. If you need to change registration when doing a scan of a site,
+# you have to authenticate again (why its not in the commented csv loop)
+
+
+# in the command below, if ScanOnly is true, the tool will run a scan to see what could happen in a migration. 
+# if ScanOnly is false, the tool will run the actual migration
+Register-SPMTMigration `
+    -ScanOnly $false `
+    -SkipSitesWithName $subsiteWebnames `
+    -MigrateNavigation $false `
+    -WorkingFolder $ReportFolder `
+    -Force
+
+# =====================================================================
+# 4. ADD THE SCAN TASK
+# Note: Omitting -SharePointSourceCredential allows SPMT to inherit
+# your active Windows CAC / Kerberos logon token for the source site.
+# =====================================================================
+
+    Add-SPMTTask `
+    -SharePointSourceSiteUrl $SourceOnPremUrl `
+    -TargetSiteUrl $TargetUrl `
+    -MigrateAll
+
+#### document loop below suports grabbing source and target from csv file
+
+<#
+Import-Csv "H:\MyDocs\Projects\SPOMigrationEffort\TestMig.csv" | ForEach-Object {
+    Write-Host $_.Source
+    Add-SPMTTask `
+    -SharePointSourceSiteUrl $_.Source `
+    -TargetSiteUrl $_.Target `
+    -MigrateAll
+}
+#>
+
+
+
+
+
+# =====================================================================
+# 5. START SCAN EXECUTION
+# =====================================================================
+Write-Host "Starting SPMT Scan in background..." -ForegroundColor Green
+Start-SPMTMigration # -NoShow (use no show if you dont want the progress bar to show) 
+
+Write-Host "Scan completed! Reports are available in: $ReportFolder" -ForegroundColor Green
