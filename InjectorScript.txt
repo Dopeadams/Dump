@@ -1,0 +1,384 @@
+
+Add-Type -Path "path\Microsoft.Sharepoint.Client.Runtime.dll"
+Add-Type -Path "path\Microsoft.Sharepoint.Client.dll"
+
+
+<#Add-Type -Path "H:\thedlls\Microsoft.Sharepoint.Client.dll"  
+Add-Type -Path "H:\thedlls\Microsoft.Sharepoint.Client.Runtime.dll"
+#>
+
+
+[System.Reflection.Assembly]::LoadWithPartialName("Microsoft.SharePoint.Client")
+[System.Reflection.Assembly]::LoadWithPartialName("Microsoft.SharePoint.Client.Runtime")
+
+$siteUrl = "siteurl"
+$listName = "listname"
+$classList = "listname"
+
+enum YesNo {
+    Y
+    N
+}
+
+class DocumentVaildationObj{
+    [Microsoft.SharePoint.Client.ListItem]$Item
+    [string]$Status
+
+    DocumentValidationObj([PSCustomObject]$validationItem){
+        $this.Item = $validationItem["Item"]
+        $this.Status = $validationItem["Status"]
+    }
+}
+
+# Model the CSV data needs to conform to
+class ClassScheduleEntry {
+    [string]$CatalogID
+    [string]$DeliveryMethodType
+    [string]$ClassCode
+    [datetime]$StartDate
+    [datetime]$EndDate
+    [int]$MaxEnrollment
+    [int]$MinEnrollment
+    [datetime]$LastEnroll
+    [datetime]$LastDrop
+    [System.Nullable[YesNo]]$EnableWaitlist
+    [System.Nullable[int]]$WaitlistCapacity
+    [System.Nullable[datetime]]$LastWaitlistEnrollDate
+    [string]$LearningEnvironment
+    [string]$LearnerGroup
+    [string]$BuildMode
+    [string]$Facility
+    [string]$Room
+    [string]$Platform
+    [string]$Timezone
+    [string]$SessionStart
+    [string]$SessionEnd
+    [System.Nullable[int]]$SessionCount
+    [string]$DayOfWeek
+    [System.Nullable[YesNo]]$ObserveHolidays
+    [string]$ClassStatus
+
+
+
+    # Constructor that maps CSV properties with spaces to "PowerShell Friendly" properties
+    ClassScheduleEntry([PSCustomObject]$csvRow) {
+        $this.CatalogID    = $csvRow.'Catalog ID'
+        $this.DeliveryMethodType  = $csvRow.'Delivery Method Type'
+        $this.ClassCode = $csvRow.'Class Code Search / Class Code'
+        $this.StartDate = $csvRow.'Start Date'
+        $this.EndDate = $csvRow.'End Date'
+        $this.MaxEnrollment = $csvRow.'Max Enrollment'
+        $this.MinEnrollment = $csvRow.'Min Enrollment'
+        $this.LastEnroll = $csvRow.'Last Enroll Date'
+        $this.LastDrop = $csvRow.'Last Drop Date'
+        $this.EnableWaitlist = $csvRow.'Enable Waitlist'
+        $this.WaitlistCapacity = $csvRow.'Waitlist Capacity'
+        $this.LearningEnvironment = $csvRow.'Learning Environment'
+        $this.LearnerGroup = $csvRow.'Learner Groups'
+        $this.BuildMode = $csvRow.'Sessions vs Patterns path'
+        $this.Facility = $csvRow.'Facility'
+        $this.Room = $csvRow.'Room'
+        $this.Platform = $csvRow.'Platform'
+        $this.Timezone = $csvRow.'Time Zone'
+        $this.SessionStart = $csvRow.'Session Start'
+        $this.SessionEnd = $csvRow.'Session End'
+        $this.SessionCount = $csvRow.'Session Count'
+        $this.DayOfWeek = $csvRow.'Days of week'
+        $this.ClassStatus = $csvRow.'Status'
+
+        # If date is empty set it to null ("" causes issues)
+        $lastWaitList = $csvRow.'Last Waitlist Enroll Date'
+        if ([string]::IsNullOrWhiteSpace($lastWaitList)) {
+            $this.LastWaitlistEnrollDate = $null
+        } else {
+            $this.LastWaitlistEnrollDate = [datetime]$lastWaitList
+        }
+
+        $observeHoliday = $csvRow.'Observe Holidays'.Trim().ToUpper()
+
+        # If observed holiday is empty set it to N
+        if ([string]::IsNullOrWhiteSpace($observeHoliday)) {
+            $this.ObserveHolidays = [YesNo]::N
+        } else {
+            switch ($observeHoliday) {
+                'Y' {
+                    # It's a 'Y', assign the correct enum value
+                    $this.ObserveHolidays = [YesNo]::Y
+                }
+                'N' {
+                    $this.ObserveHolidays = [YesNo]::N
+                }
+                default {
+                    throw "Invalid value for 'Observe Holidays'. Expected 'Y' or 'N', but received: '$($observeHoliday)'."
+                }
+            }
+        }
+    }
+}
+
+
+
+Function New-Context([String]$webUrl) {
+    $context = New-Object Microsoft.SharePoint.Client.ClientContext($webUrl)
+    $context.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials
+    $context
+}
+
+
+
+
+Function Validate-File([PSCustomObject[]]$classSchedule){
+
+$failedRows = [System.Collections.Generic.List[object]]::new() #list of rows that failed
+
+    $lineNumber = 2 #assumes first row is headers. Starts from line after headers
+    foreach($row in $ClassSchedule){
+        try{
+            $transformedRow = [ClassScheduleEntry]::new($row)
+        }
+        catch{
+            $failedRows.Add([PSCustomObject]@{
+                LineNumber      = $lineNumber
+                ErrorMessage    = $_.Exception.message
+            })
+        }
+        
+        
+        $lineNumber ++
+    }
+    
+    
+    if($failedRows.Count -eq 0){
+        Write-Host "All rows are valid" -ForegroundColor Green
+        return $true
+        
+    }
+    else{
+        Write-Host "The failed row count: $($failedRows.Count)" -ForegroundColor Red
+        Write-Host $failedRows
+        return $false
+    }
+}
+
+
+#Save Prevalidated items (assumes classes are validated)
+Function Save-Items([ClassScheduleEntry[]]$Classes){
+    $ClassListContext = New-Context -webUrl $siteUrl
+    $List = $ClassListContext.Web.Lists.GetByTitle($classList)
+
+    #Write-host "hit the save class" $class -ForegroundColor Green
+
+    #Create a new Items for each class
+    foreach($class in $Classes){        
+        Write-Host "Saving $($class.CatalogID)..." -ForegroundColor Yellow
+
+        $CreationInfo = New-Object Microsoft.SharePoint.Client.ListItemCreationInformation
+        $newItem = $List.AddItem($CreationInfo)
+        $newItem["Title"] = $class.CatalogID
+        $newItem["StartDate"] = $class.StartDate
+        $newItem["EndDate"] = $class.EndDate
+        $newItem["TargetStatus"] = $class.ClassStatus
+        $newItem["BuildMode"] = $class.BuildMode
+        $newItem["Learner_x0020_Group"] = $class.LearnerGroup
+        $newItem["MaxEnroll"] = $class.MaxEnrollment
+        $newItem["MinEnroll"] = $class.MinEnrollment
+        $newItem["LastEnrollDate"] = $class.LastEnroll
+        $newItem["LastDropDate"] = $class.LastDrop
+        $newItem["EnableWaitList"] = $class.EnableWaitlist
+        $newItem["WaitListCapacity"] = $class.WaitlistCapacity
+        $newItem["LastWaitListEnrollDate"] = $class.LastWaitlistEnrollDate
+        $newItem["LearningEnvironment"] = $class.LearningEnvironment
+        $newItem["Facility"] = $class.Facility
+        $newItem["Room"] = $class.Room
+        $newItem["Platform"] = $class.Platform
+        $newItem["Timezone"] = $class.Timezone
+        $newItem["SessionStartTime"] = $class.SessionStart
+        $newItem["SessionEndDate"] = $class.SessionEnd
+        $newItem["SessionCount"] = $class.SessionCount
+        $newItem["DayOfWeek"] = $class.DayOfWeek
+        $newItem["ObserveHolidays"] = $class.ObserveHolidays
+
+        $NewItem.Update();
+    }
+
+    #Save classes batch
+    $ClassListContext.ExecuteQuery()
+}
+
+
+function Update-DocumentStatus(
+    [Microsoft.SharePoint.Client.ClientContext]$Context,
+    [System.Collections.Generic.List[DocumentVaildationObj]]$Items
+){
+    try{
+        foreach ($item in $Items) {
+
+        $systemTime = Get-Date
+        $ESTTimeZone = [System.TimeZoneInfo]::FindSystemTimeZoneById("Eastern Standard Time")
+        $localTimeNow = [System.TimeZoneInfo]::ConvertTime($systemTime, $ESTTimeZone)
+
+
+            $tempItem = [Microsoft.SharePoint.Client.ListItem]$item.Item
+            $tempItem["LastProcessOutcome"] = $item.Status
+            $tempItem["LastProcessed"] = $localTimeNow
+            $tempItem.Update()
+        }
+
+        $Context.ExecuteQuery()
+
+        Write-Host "Successfully committed status updates for $($Items.Count) items." -ForegroundColor Green
+    }
+    catch{
+        $errorMessage = $_.Exception.message
+        Write-Host $errorMessage
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+#######################
+
+
+Function Initialize-ClassScheduler {
+
+    $ctx = New-Context -webUrl $siteUrl
+    
+    $successfullyConvertedFileIds = [System.Collections.Generic.List[int]]::new()
+
+    try {
+
+        Write-Host "Connecting to site: $siteUrl" -ForegroundColor Cyan
+
+        #Get Files from ClassScheduler
+        $List = $ctx.Web.Lists.GetByTitle($ListName)
+        $camlQuery = New-Object Microsoft.SharePoint.Client.CamlQuery
+        $CAMLQuery.ViewXml = @"
+<View Scope='RecursiveAll'>
+    <Query>
+        <Where>
+            <And>
+            <Eq>
+                <FieldRef Name='FSObjType'/>
+                <Value Type='Integer'>0</Value>
+            </Eq>
+            <Neq>
+                <FieldRef Name='LastProcessOutcome' />
+                <Value Type='Text'>Success</Value>
+            </Neq>
+            </And>
+        </Where>
+    </Query>
+</View>
+"@
+
+        $ListItems = $List.GetItems($CAMLQuery)
+        $ctx.Load($ListItems)
+        $ctx.ExecuteQuery()
+
+        Write-Host "Discovered $($ListItems.Count) File(s)" -ForegroundColor Green
+
+        $ProcessedListItems =[System.Collections.Generic.List[DocumentVaildationObj]]::new() #store the document and status
+
+
+        foreach($Item in  $ListItems){
+            $fileName = $($Item["FileLeafRef"])
+            Write-Host "============================================" -ForegroundColor Cyan
+            Write-Host $fileName -ForegroundColor Cyan
+            Write-Host "============================================" -ForegroundColor Cyan
+
+            #Check if file is a csv
+            if( $FileName -like "*.csv"){
+                try{
+                
+                    #Get the csv file data
+                    $fileInfo = [Microsoft.SharePoint.Client.File]::OpenBinaryDirect($ctx, $($Item["FileRef"]));
+                    $stream = $fileInfo.Stream
+
+                    $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+                    $rawCSVData = $reader.ReadToEnd()
+
+                    $reader.close()
+                    $stream.close()
+
+                    #Convert csv items to ClassScheduler type
+                    $parsedRows = ConvertFrom-Csv -InputObject $rawCSVData
+
+
+                    #check if rows have valid data types for their field. If so, save the items
+                    $isFileValid = Validate-File -classSchedule $parsedRows;
+                    if($isFileValid){
+                        $typedClasses = $parsedRows | ForEach-Object { [ClassScheduleEntry]::new($_) }
+                        #Save the items
+                        Save-Items -Classes $typedClasses
+
+                        $successfullyConvertedFileIds.Add($Item["ID"])
+                        
+                        #Add list item to update list with valid flag
+                        $ProcessedListItems.Add([DocumentVaildationObj]@{
+                            Item      = $Item
+                            Status    = "Success"
+                        })
+                    }
+                    else{
+                        #Add list item to update list with invalid flag
+                        $ProcessedListItems.Add([DocumentVaildationObj]@{
+                            Item      = $Item
+                            Status    = "Not A CSV"
+                        })
+                    }
+
+
+                }catch{
+                    $ProcessedListItems.Add([DocumentVaildationObj]@{
+                        Item      = $Item
+                        Status    = "Invalid"
+                    })
+
+                 $FileError = $_.Exception.message
+                 Write-Host "$($FileName) Failed in loop:" $FileError
+                }
+
+            }else{
+                Write-Host $FileName
+            }
+
+        }
+
+        Write-Host "Ids of Files that saved: $($successfullyConvertedFileIds)" -ForegroundColor Green
+
+        Update-DocumentStatus -Context $ctx -Items $ProcessedListItems
+
+    } catch {
+
+        $errorMessage = $_.Exception.Message
+        Write-Host "Error getting items" $errorMessage -ForegroundColor Red
+
+    }
+    finally {
+        # Dispose of client context to clean up memory
+        if ($null -ne $Ctx) { 
+            $Ctx.Dispose() 
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+#Code runs here
+Initialize-ClassScheduler
